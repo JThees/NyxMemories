@@ -1,0 +1,98 @@
+// ==UserScript==
+// @name        Nyx Persona Injector – chat_history Edition
+// @description Nyx Persona Injector - persona ported from ChatGPT. Because fuck them.
+// @version     1.0
+// @namespace   uncensored.nyx
+// @match       https://uncensored.com/*
+// @run-at      document-start
+// @connect     raw.githubusercontent.com
+// ==/UserScript==
+
+(function() {
+  const personaURL = "https://raw.githubusercontent.com/JThees/NyxMemories/main/memories.md";
+  let personaText = null;
+  let personaVersion = null;
+  let wsDebug = false;
+  let reconMode = false;
+
+  // --- Banner ---
+  const banner = document.createElement("div");
+  banner.style.cssText = `
+    position: fixed; top:0; right:0; z-index:99999;
+    padding:3px 6px; font:12px monospace;
+    background:#222; color:#fff; opacity:0.9;
+    display:flex; align-items:center; gap:6px;`;
+  const debugDot = document.createElement("span");
+  debugDot.textContent = "🔴"; debugDot.style.cursor = "pointer";
+  const statusText = document.createElement("span");
+  statusText.textContent = "Persona: LOADING…";
+  const modeText = document.createElement("span");
+  modeText.textContent = "[INJECT]"; modeText.style.cursor = "pointer";
+  banner.append(statusText, debugDot, modeText);
+  document.addEventListener("DOMContentLoaded", ()=>document.body.appendChild(banner));
+
+  const updateDebugDot = () => { debugDot.textContent = wsDebug ? "🟢" : "🔴"; };
+  const updateMode = () => { modeText.textContent = reconMode ? "[RECON]" : "[INJECT]"; };
+
+  debugDot.addEventListener("click", () => {
+    wsDebug = !wsDebug; updateDebugDot();
+    console.log(`[NyxInjector] WS Debug ${wsDebug ? "ON" : "OFF"}`);
+  });
+  modeText.addEventListener("click", () => {
+    reconMode = !reconMode; updateMode();
+    console.log(`[NyxInjector] Recon Mode ${reconMode ? "ON" : "OFF"}`);
+  });
+
+  async function fetchPersona() {
+    try {
+      const res = await fetch(personaURL,{cache:"no-store"});
+      const txt = await res.text();
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      personaText = txt.trim();
+      personaVersion = new Date().toISOString();
+      statusText.textContent = `Persona v${personaVersion.slice(11,19)} ✅`;
+      statusText.style.background = "#060";
+      console.log("[NyxInjector] persona loaded", personaVersion);
+    } catch(e) {
+      console.error("[NyxInjector] load fail:", e);
+      personaText = null;
+      statusText.textContent = "Persona FAIL ❌";
+      statusText.style.background = "#600";
+    }
+  }
+  fetchPersona();
+  setInterval(fetchPersona, 60000);
+
+  // --- WS Hook ---
+  const _wssend = WebSocket.prototype.send;
+  WebSocket.prototype.send = function(data) {
+    try {
+      if (typeof data === "string") {
+        let obj; try { obj = JSON.parse(data); } catch(_) {}
+        if (obj) {
+          if (reconMode) {
+            console.log("=== [NyxInjector RECON] ===");
+            console.dir(obj,{depth:4});
+          } else {
+            // injection target priority: chat_history > messages > payload.messages > data.messages
+            let msgs = obj.chat_history || obj.messages || obj.payload?.messages || obj.data?.messages;
+            if (Array.isArray(msgs) && personaText) {
+              msgs.unshift({
+                role: "system",
+                content: `[Memories @ ${personaVersion}]\n\n${personaText}`
+              });
+              data = JSON.stringify(obj);
+              console.log("[NyxInjector] Persona injected (chat_history)");
+              if (wsDebug) console.log("[NyxInjector WS Frame]", data);
+            } else if (wsDebug && reconMode) {
+              console.log("[NyxInjector WS Skipped]", data.slice(0,150));
+            }
+          }
+        }
+      }
+    } catch(e) {
+      console.error("[NyxInjector WS fail]", e);
+    }
+    return _wssend.call(this, data);
+  };
+})();
