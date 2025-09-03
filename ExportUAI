@@ -1,0 +1,467 @@
+// ==UserScript==
+// @name         Export All Chats from Uncensored AI - Fixed
+// @namespace    http://tampermonkey.net/
+// @version      0.9
+// @description  Export all conversations from uncensored.com/ai as JSON
+// @author       J
+// @match        https://uncensored.com/ai*
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+    /**
+     * Find chat history items in the sidebar
+     */
+    function findChatHistoryItems() {
+        const containers = document.querySelectorAll('div[style*="flex-direction: column"]');
+
+        for (const cont of containers) {
+            const chatItems = cont.querySelectorAll('div[tabindex="0"].css-175oi2r.r-1loqt21.r-1otgn73');
+            if (chatItems.length > 1) {
+                console.log(`Found chat history with ${chatItems.length} items`);
+                return chatItems;
+            }
+        }
+
+        const allTabItems = document.querySelectorAll('div[tabindex="0"].css-175oi2r.r-1loqt21.r-1otgn73');
+        console.log(`Fallback: Found ${allTabItems.length} potential chat items`);
+        return allTabItems;
+    }
+
+    /**
+     * Get chat title from sidebar item
+     */
+    function getChatTitle(chatItem, index) {
+        const titleDiv = chatItem.querySelector('div[dir="auto"]');
+        if (titleDiv) {
+            return titleDiv.title || titleDiv.textContent.trim() || `Chat ${index + 1}`;
+        }
+        return `Chat ${index + 1}`;
+    }
+
+    /**
+     * Collect messages from current chat
+     */
+    function collectCurrentChatMessages() {
+        const messages = [];
+
+        const mainChatArea = document.querySelector('div[style*="max-width: 816px"]');
+        if (!mainChatArea) {
+            console.error('Could not find main chat area');
+            return messages;
+        }
+
+        console.log('Found main chat area:', mainChatArea);
+
+        // Target the message containers we identified
+        const msgContainers = mainChatArea.querySelectorAll('div.css-175oi2r.r-1habvwh.r-18u37iz.r-1w6e6rj.r-1h0z5md.r-1iyrmfx.r-5oul0u.r-14gqq1x.r-13qz1uu');
+
+        console.log(`Found ${msgContainers.length} message containers`);
+
+        if (msgContainers.length === 0) {
+            // Fallback approach
+            const allDivs = mainChatArea.querySelectorAll('div');
+            const containersWithTextSpans = Array.from(allDivs).filter(div => {
+                const spans = div.querySelectorAll('span.css-1jxf684');
+                return spans.length > 0;
+            });
+
+            console.log(`Fallback: Found ${containersWithTextSpans.length} containers with text spans`);
+
+            containersWithTextSpans.forEach((msgContainer, idx) => {
+                processMessageContainer(msgContainer, idx, mainChatArea, messages);
+            });
+        } else {
+            msgContainers.forEach((msgContainer, idx) => {
+                processMessageContainer(msgContainer, idx, mainChatArea, messages);
+            });
+        }
+
+        console.log(`Collected ${messages.length} messages total`);
+        return messages;
+    }
+
+    /**
+     * Process a single message container
+     */
+    function processMessageContainer(msgContainer, index, mainArea, messages) {
+        try {
+            const textSpans = msgContainer.querySelectorAll('span.css-1jxf684');
+
+            if (textSpans.length > 0) {
+                // Combine all text spans
+                const contentParts = Array.from(textSpans).map(span => span.innerText || span.textContent).filter(Boolean);
+                const content = contentParts.join('');
+
+                if (content && content.length > 10) {
+                    // Role detection using the assistant icon
+                    let role = 'user';
+
+                    // Search up the DOM tree for the assistant icon
+                    let currentElement = msgContainer.parentElement;
+                    let searchDepth = 0;
+
+                    while (currentElement && currentElement !== mainArea && searchDepth < 6) {
+                        const assistantIcon = currentElement.querySelector('img[src*="icon.b0b15e3a930ffbcd82e00a13e99492a4.png"]') ||
+                                            currentElement.querySelector('img.css-9pa8cd') ||
+                                            currentElement.querySelector('img[src*="/assets/assets/icon"]');
+
+                        if (assistantIcon) {
+                            role = 'assistant';
+                            console.log(`Found assistant icon at search depth ${searchDepth}`);
+                            break;
+                        }
+
+                        currentElement = currentElement.parentElement;
+                        searchDepth++;
+                    }
+
+                    // Content pattern fallback
+                    if (role === 'user') {
+                        const assistantPatterns = [
+                            /^(I hear you|Injection worked|I |Let me |Here's |That's |Yep)/,
+                            /injection worked/i,
+                            /#AlwaysNyx/,
+                            /^(Perfect|Got it|Alright)/
+                        ];
+
+                        if (assistantPatterns.some(pattern => pattern.test(content))) {
+                            role = 'assistant';
+                            console.log(`Detected assistant by content pattern`);
+                        }
+                    }
+
+                    const message = { role, content };
+                    messages.push(message);
+                    console.log(`Message ${index}: ${role} - ${content.substring(0, 80)}...`);
+                }
+            }
+        } catch (error) {
+            console.warn(`Error processing message ${index}:`, error);
+        }
+    }
+
+    /**
+     * Load all messages by scrolling
+     */
+    async function loadAllMessagesInCurrentChat() {
+        const scrollContainers = [
+            document.querySelector('div[style*="max-width: 816px"]'),
+            document.querySelector('div[style*="flex: 1 1 0%"]'),
+            document.body
+        ].filter(Boolean);
+
+        for (const scrollCont of scrollContainers) {
+            let previousHeight = scrollCont.scrollHeight;
+            let attempts = 0;
+            const maxAttempts = 15;
+
+            while (attempts < maxAttempts) {
+                scrollCont.scrollTop = 0;
+                await delay(1500);
+
+                if (scrollCont.scrollHeight === previousHeight) {
+                    break;
+                }
+
+                previousHeight = scrollCont.scrollHeight;
+                attempts++;
+                console.log(`Scroll attempt ${attempts}: height ${scrollCont.scrollHeight}`);
+            }
+
+            if (attempts > 0) {
+                console.log(`Finished loading after ${attempts} attempts`);
+                return true;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Export all chats
+     */
+    async function exportAllChats() {
+        const exportData = {
+            exported_at: new Date().toISOString(),
+            total_chats: 0,
+            chats: {}
+        };
+
+        const chatItems = findChatHistoryItems();
+
+        if (chatItems.length === 0) {
+            alert('No chat items found');
+            return;
+        }
+
+        console.log(`Exporting ${chatItems.length} chats`);
+        exportData.total_chats = chatItems.length;
+
+        for (let i = 0; i < chatItems.length; i++) {
+            try {
+                const chatItem = chatItems[i];
+                const title = getChatTitle(chatItem, i);
+
+                console.log(`Exporting ${i + 1}/${chatItems.length}: "${title}"`);
+
+                chatItem.click();
+                await delay(3000);
+
+                await loadAllMessagesInCurrentChat();
+                const msgs = collectCurrentChatMessages();
+
+                exportData.chats[title] = {
+                    chat_title: title,
+                    message_count: msgs.length,
+                    exported_at: new Date().toISOString(),
+                    messages: msgs
+                };
+
+                console.log(`Exported ${msgs.length} messages from "${title}"`);
+                await delay(1000);
+
+            } catch (error) {
+                console.error(`Error processing chat ${i + 1}:`, error);
+                continue;
+            }
+        }
+
+        if (Object.keys(exportData.chats).length > 0) {
+            const timestamp = new Date().toISOString().slice(0, 19).replace(/[:.]/g, '-');
+            const filename = `uncensored-ai-chats-${timestamp}.json`;
+
+            const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+
+            alert(`Exported ${Object.keys(exportData.chats).length} chats to ${filename}`);
+        } else {
+            alert('Export failed - no chats found');
+        }
+    }
+
+    /**
+     * Export just current chat
+     */
+    async function exportCurrentChat() {
+        await loadAllMessagesInCurrentChat();
+        const msgs = collectCurrentChatMessages();
+
+        if (msgs.length === 0) {
+            alert('No messages found in current chat');
+            return;
+        }
+
+        const timestamp = new Date().toISOString().slice(0, 19).replace(/[:.]/g, '-');
+        const filename = `uncensored-current-chat-${timestamp}.json`;
+
+        const blob = new Blob([JSON.stringify(msgs, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        alert(`Exported ${msgs.length} messages from current chat`);
+    }
+
+    /**
+     * Add buttons to page
+     */
+    function addExportButtons() {
+        if (document.getElementById('export-all-btn')) {
+            return;
+        }
+
+        if (!document.body) {
+            return;
+        }
+
+        const exportAllButton = document.createElement('button');
+        exportAllButton.id = 'export-all-btn';
+        exportAllButton.textContent = 'Export All Chats';
+        Object.assign(exportAllButton.style, {
+            position: 'fixed',
+            bottom: '20px',
+            right: '20px',
+            padding: '10px 20px',
+            backgroundColor: '#007bff',
+            color: 'white',
+            border: 'none',
+            borderRadius: '5px',
+            cursor: 'pointer',
+            zIndex: '9999',
+            fontSize: '14px',
+            fontFamily: 'sans-serif'
+        });
+
+        const exportCurrentButton = document.createElement('button');
+        exportCurrentButton.id = 'export-current-btn';
+        exportCurrentButton.textContent = 'Export Current Chat';
+        Object.assign(exportCurrentButton.style, {
+            position: 'fixed',
+            bottom: '70px',
+            right: '20px',
+            padding: '8px 16px',
+            backgroundColor: '#28a745',
+            color: 'white',
+            border: 'none',
+            borderRadius: '5px',
+            cursor: 'pointer',
+            zIndex: '9999',
+            fontSize: '12px',
+            fontFamily: 'sans-serif'
+        });
+
+        const debugButton = document.createElement('button');
+        debugButton.id = 'debug-btn';
+        debugButton.textContent = 'Debug';
+        Object.assign(debugButton.style, {
+            position: 'fixed',
+            bottom: '120px',
+            right: '20px',
+            padding: '6px 12px',
+            backgroundColor: '#ffc107',
+            color: 'black',
+            border: 'none',
+            borderRadius: '5px',
+            cursor: 'pointer',
+            zIndex: '9999',
+            fontSize: '11px',
+            fontFamily: 'sans-serif'
+        });
+
+        exportAllButton.addEventListener('click', async () => {
+            if (!confirm('Export all chats? This may take a while.')) return;
+            exportAllButton.textContent = 'Exporting...';
+            exportAllButton.disabled = true;
+            try {
+                await exportAllChats();
+            } catch (error) {
+                console.error('Export failed:', error);
+                alert('Export failed. Check console.');
+            }
+            exportAllButton.textContent = 'Export All Chats';
+            exportAllButton.disabled = false;
+        });
+
+        exportCurrentButton.addEventListener('click', async () => {
+            exportCurrentButton.textContent = 'Exporting...';
+            exportCurrentButton.disabled = true;
+            try {
+                await exportCurrentChat();
+            } catch (error) {
+                console.error('Export failed:', error);
+                alert('Export failed. Check console.');
+            }
+            exportCurrentButton.textContent = 'Export Current Chat';
+            exportCurrentButton.disabled = false;
+        });
+
+        debugButton.addEventListener('click', () => {
+            console.log('=== DEBUG INFO ===');
+
+            const mainArea = document.querySelector('div[style*="max-width: 816px"]');
+            if (mainArea) {
+                console.log('Found main area:', mainArea);
+
+                const msgContainers = mainArea.querySelectorAll('div.css-175oi2r.r-1habvwh.r-18u37iz.r-1w6e6rj.r-1h0z5md.r-1iyrmfx.r-5oul0u.r-14gqq1x.r-13qz1uu');
+                console.log(`Found ${msgContainers.length} message containers`);
+
+                // Check for assistant icons
+                const allImages = document.querySelectorAll('img');
+                console.log(`Found ${allImages.length} images on page:`);
+                allImages.forEach((img, idx) => {
+                    console.log(`Image ${idx}:`, {
+                        src: img.src,
+                        className: img.className,
+                        isAssistantIcon: img.src.includes('icon.b0b15e3a930ffbcd82e00a13e99492a4.png') || img.className.includes('css-9pa8cd')
+                    });
+                });
+
+                // Hunt for timestamps
+                console.log('\n=== TIMESTAMP HUNTING ===');
+                const timestampElements = document.querySelectorAll('[data-time], [data-timestamp], [datetime], time, [title*="2024"], [title*="2025"], [title*=":"]');
+                console.log(`Found ${timestampElements.length} potential timestamp elements:`);
+                timestampElements.forEach((el, idx) => {
+                    console.log(`Timestamp element ${idx}:`, {
+                        tagName: el.tagName,
+                        textContent: el.textContent,
+                        title: el.title,
+                        dataTime: el.getAttribute('data-time'),
+                        dataTimestamp: el.getAttribute('data-timestamp'),
+                        datetime: el.getAttribute('datetime'),
+                        element: el
+                    });
+                });
+
+                // Test message processing
+                msgContainers.forEach((msgCont, idx) => {
+                    const textSpans = msgCont.querySelectorAll('span.css-1jxf684');
+                    const content = Array.from(textSpans).map(span => span.innerText || span.textContent).filter(Boolean).join('');
+
+                    if (content.length > 10) {
+                        console.log(`\nMessage ${idx}: ${content.substring(0, 60)}...`);
+
+                        // Check for icon
+                        let currentEl = msgCont.parentElement;
+                        let depth = 0;
+                        while (currentEl && depth < 6) {
+                            const icon = currentEl.querySelector('img[src*="icon.b0b15e3a930ffbcd82e00a13e99492a4.png"], img.css-9pa8cd');
+                            if (icon) {
+                                console.log(`  -> Found assistant icon at depth ${depth}`);
+                                break;
+                            }
+                            currentEl = currentEl.parentElement;
+                            depth++;
+                        }
+
+                        // Check for timestamps in this message's hierarchy
+                        let timestampEl = msgCont.parentElement;
+                        let tsDepth = 0;
+                        while (timestampEl && tsDepth < 6) {
+                            const possibleTimestamp = timestampEl.querySelector('[data-time], [datetime], [title*="2024"], [title*="2025"]');
+                            if (possibleTimestamp) {
+                                console.log(`  -> Found timestamp element at depth ${tsDepth}:`, possibleTimestamp);
+                            }
+                            timestampEl = timestampEl.parentElement;
+                            tsDepth++;
+                        }
+                    }
+                });
+            }
+
+            alert('Debug info logged to console');
+        });
+
+        document.body.appendChild(exportAllButton);
+        document.body.appendChild(exportCurrentButton);
+        document.body.appendChild(debugButton);
+        console.log('Buttons added successfully');
+    }
+
+    // Set up observer
+    const observer = new MutationObserver(addExportButtons);
+    observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true
+    });
+
+    // Try immediate injection
+    addExportButtons();
+
+})();
